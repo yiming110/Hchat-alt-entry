@@ -11018,25 +11018,8 @@ private fun AutoReplyMiuixPage(
     val ruleListState = rememberLazyListState()
     var ruleQuery by remember { mutableStateOf("") }
     val ruleEditorListState = rememberLazyListState()
-    val autoAcceptListState = rememberLazyListState()
     val greetAcceptedListState = rememberLazyListState()
-    val autoAcceptLabelListState = rememberLazyListState()
     val greetAcceptedLabelListState = rememberLazyListState()
-    val autoAcceptAutomationKeys = remember {
-        AutoReplyFriendAutomationKeys(
-            AutoReplySettings.KEY_AUTO_ACCEPT_LABEL_NEW_FRIEND_ENABLE,
-            AutoReplySettings.KEY_AUTO_ACCEPT_LABEL_DATE_ENABLE,
-            AutoReplySettings.KEY_AUTO_ACCEPT_LABEL_DATE_FORMAT,
-            AutoReplySettings.KEY_AUTO_ACCEPT_LABEL_EXISTING_ENABLE,
-            AutoReplySettings.KEY_AUTO_ACCEPT_LABEL_SELECTED_NAMES,
-            AutoReplySettings.KEY_AUTO_ACCEPT_REMARK_NEW_FRIEND_ENABLE,
-            AutoReplySettings.KEY_AUTO_ACCEPT_REMARK_NICKNAME_SUFFIX_ENABLE,
-            AutoReplySettings.KEY_AUTO_ACCEPT_REMARK_DATE_ENABLE,
-            AutoReplySettings.KEY_AUTO_ACCEPT_REMARK_DATE_FORMAT,
-            AutoReplySettings.KEY_AUTO_ACCEPT_REMARK_CUSTOM_ENABLE,
-            AutoReplySettings.KEY_AUTO_ACCEPT_REMARK_CUSTOM_TEXT
-        )
-    }
     val greetAcceptedAutomationKeys = remember {
         AutoReplyFriendAutomationKeys(
             AutoReplySettings.KEY_GREET_ACCEPTED_LABEL_NEW_FRIEND_ENABLE,
@@ -11151,27 +11134,10 @@ private fun AutoReplyMiuixPage(
                 )
             }
         }
-        "autoAccept" -> AutoReplyFriendPage(
-            context = context,
-            title = "好友请求处理",
-            sp = sp,
-            enabledKey = AutoReplySettings.KEY_AUTO_ACCEPT_ENABLE,
-            delayKey = AutoReplySettings.KEY_AUTO_ACCEPT_DELAY_MS,
-            tagEnabledKey = AutoReplySettings.KEY_AUTO_ACCEPT_TAG_ENABLE,
-            tagNameKey = AutoReplySettings.KEY_AUTO_ACCEPT_TAG_NAME,
-            steps = settings.autoAcceptSteps(),
-            listState = autoAcceptListState,
-            onBack = { route = "main" },
-            automationKeys = autoAcceptAutomationKeys,
-            onSelectLabels = { route = "autoAcceptLabels" },
-            onEditSteps = { editingSteps = "好友请求回复" to settings.autoAcceptSteps() }
-        )
-        "autoAcceptLabels" -> AutoReplyLabelPickerPage(
+        "autoAccept" -> AutoReplyManualFriendPage(
             context = context,
             sp = sp,
-            selectedKey = AutoReplySettings.KEY_AUTO_ACCEPT_LABEL_SELECTED_NAMES,
-            listState = autoAcceptLabelListState,
-            onBack = { route = "autoAccept" }
+            onBack = { route = "main" }
         )
         "greetAccepted" -> AutoReplyFriendPage(
             context = context,
@@ -11933,7 +11899,7 @@ private fun AutoReplyMainPage(
                     InsetDivider()
                     ActionRow("回复规则", if (rules.isEmpty()) "暂无规则" else "${rules.size} 条规则，${rules.count { it.enabled }} 条启用", onOpenRules)
                     InsetDivider()
-                    ActionRow("好友请求处理", "自动同意好友申请并按步骤发送欢迎内容", onOpenAutoAccept)
+                    ActionRow("好友请求处理", "不再自动同意，手动通过后自动在备注后追加日期", onOpenAutoAccept)
                     InsetDivider()
                     ActionRow("通过后欢迎语", "对方通过你的好友请求后发送欢迎内容", onOpenGreetAccepted)
                     InsetDivider()
@@ -12350,6 +12316,75 @@ private fun AutoReplyRuleEditorContent(
                     SwitchRow(current.replyAsQuote, "引用回复", "文本和 AI 可引用原消息回复") { onRuleChange(current.copy(replyAsQuote = it)) }
                     InsetDivider()
                     ActionRow("回复步骤", describeAutoReplySteps(current.steps), onEditSteps)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutoReplyManualFriendPage(
+    context: Context,
+    sp: SharedPreferences,
+    onBack: () -> Unit
+) {
+    var remarkDateFormat by remember {
+        mutableStateOf(
+            sp.getString(
+                AutoReplySettings.KEY_MANUAL_FRIEND_REMARK_DATE_FORMAT,
+                AutoReplySettings.DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT
+            ) ?: AutoReplySettings.DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT
+        )
+    }
+    val scrollBehavior = MiuixScrollBehavior()
+    PageScaffold(
+        title = "好友请求处理",
+        largeTitle = "好友请求处理",
+        scrollBehavior = scrollBehavior,
+        bottomBar = {
+            BottomActionBar(
+                primaryText = "保存",
+                onPrimaryClick = {
+                    sp.edit()
+                        .putString(
+                            AutoReplySettings.KEY_MANUAL_FRIEND_REMARK_DATE_FORMAT,
+                            remarkDateFormat.trim().ifBlank {
+                                AutoReplySettings.DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT
+                            }
+                        )
+                        .apply()
+                    Toast.makeText(context, "设置已保存", Toast.LENGTH_SHORT).show()
+                },
+                secondaryText = "返回",
+                onSecondaryClick = onBack
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
+            contentPadding = PaddingValues(
+                top = padding.calculateTopPadding() + 8.dp,
+                bottom = padding.calculateBottomPadding() + 84.dp
+            )
+        ) {
+            item { SmallTitle(text = "好友请求") }
+            item {
+                SettingsCard {
+                    SwitchRow(
+                        sp,
+                        AutoReplySettings.KEY_MANUAL_FRIEND_ENABLE,
+                        "手动通过后自动备注",
+                        "不会自动同意好友申请，需要你在微信里手动通过",
+                        AutoReplySettings.DEFAULT_MANUAL_FRIEND_ENABLE
+                    )
+                    InsetDivider()
+                    InputRow("备注日期格式", "例如 yyyy-MM-dd", remarkDateFormat) { remarkDateFormat = it }
+                }
+            }
+            item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "说明") }
+            item {
+                SettingsCard {
+                    EmptyText("开启后不会替你自动点“通过”。你在微信里手动通过好友申请后，模块会把当天日期追加到该好友备注后面，例如“张三 2026-10-23”；已有备注会保留，日期已存在时不会重复追加。")
                 }
             }
         }

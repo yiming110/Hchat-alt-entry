@@ -30,6 +30,10 @@ class AutoReplyFeature : BaseFeature() {
             trackSubscription(ScriptNewFriendHook.subscribe { event ->
                 AutoReplyRuntime.handleNewFriend(context.hostContext(), event.wxid, event.ticket, event.scene)
             })
+            // 好友申请不自动通过：监听联系人表变化，等用户手动通过后补备注日期。
+            trackSubscription(WeChatApis.contactChanges()?.subscribe { change ->
+                AutoReplyRuntime.handleContactChanged(context.hostContext(), change?.wxId().orEmpty())
+            })
         }
     }
 

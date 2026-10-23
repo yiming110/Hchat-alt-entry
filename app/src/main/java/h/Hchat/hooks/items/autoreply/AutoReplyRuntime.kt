@@ -54,6 +54,7 @@ object AutoReplyRuntime {
     private const val XIAOZHI_WAKE_TEXT_MAX_LENGTH = 10
     private const val XIAOZHI_VOICE_STOP_GRACE_MS = 800L
     private const val XIAOZHI_SOCKET_IDLE_MS = 90_000L
+    private const val PENDING_MANUAL_FRIEND_TTL_MS = 30 * 60 * 1000L
     private const val XIAOZHI_OPUS_PCM_SAMPLE_RATE = 48000
     private const val XIAOZHI_SILK_SAMPLE_RATE = 24000
     private val executor = Executors.newSingleThreadExecutor { runnable ->
@@ -67,6 +68,8 @@ object AutoReplyRuntime {
         .build()
     private val replyCounts = ConcurrentHashMap<String, Int>()
     private val lastReplyTimes = ConcurrentHashMap<String, Long>()
+    private val pendingManualFriends = ConcurrentHashMap<String, Long>()
+    private val manualRemarkLock = Any()
     private val aiHistories = ConcurrentHashMap<String, MutableList<AiMessage>>()
     private val xiaozhiSessions = ConcurrentHashMap<String, String>()
     private val xiaozhiSockets = ConcurrentHashMap<String, XiaozhiSocketSession>()
@@ -219,6 +222,7 @@ object AutoReplyRuntime {
         executor.execute {
             runCatching {
                 handleFriendAccepted(context, settings, message)
+                handleManualAcceptTip(settings, message)
                 handleAutoReply(context, settings, message)
             }.onFailure {
                 HLog.e("$TAG 处理消息失败: ${it.message}", it)
@@ -228,6 +232,15 @@ object AutoReplyRuntime {
 
     fun handleNewFriend(context: Context, wxid: String, ticket: String, scene: Int) {
         val settings = AutoReplySettings(context)
+        if (settings.getBoolean(AutoReplySettings.KEY_MANUAL_FRIEND_ENABLE, AutoReplySettings.DEFAULT_MANUAL_FRIEND_ENABLE)) {
+            // 手动通过模式：这里只登记申请人，绝不代替用户点“通过”。
+            if (wxid.isNotBlank()) {
+                val now = System.currentTimeMillis()
+                pendingManualFriends.entries.removeAll { now - it.value > PENDING_MANUAL_FRIEND_TTL_MS }
+                pendingManualFriends[wxid] = now
+            }
+            return
+        }
         if (!settings.getBoolean(AutoReplySettings.KEY_AUTO_ACCEPT_ENABLE, false)) return
         executor.execute {
             runCatching {
@@ -246,6 +259,66 @@ object AutoReplyRuntime {
                 HLog.e("$TAG 好友申请处理失败: ${it.message}", it)
             }
         }
+    }
+
+    /**
+     * 联系人表变化回调。只有“之前收到过好友申请 + 现在已经是好友”两个条件同时满足，
+     * 才说明用户刚刚在微信里手动通过了申请，此时再补备注日期。
+     */
+    fun handleContactChanged(context: Context, wxid: String) {
+        if (wxid.isBlank()) return
+        val requestedAt = pendingManualFriends[wxid] ?: return
+        if (System.currentTimeMillis() - requestedAt > PENDING_MANUAL_FRIEND_TTL_MS) {
+            pendingManualFriends.remove(wxid, requestedAt)
+            return
+        }
+        val settings = AutoReplySettings(context)
+        if (!settings.getBoolean(AutoReplySettings.KEY_MANUAL_FRIEND_ENABLE, AutoReplySettings.DEFAULT_MANUAL_FRIEND_ENABLE)) return
+        val contacts = WeChatApis.contact().contacts() ?: return
+        if (!contacts.isFriend(wxid)) return
+        // 先摘掉登记再写库，避免自己修改备注触发的 rcontact 变更再次进入这里。
+        if (!pendingManualFriends.remove(wxid, requestedAt)) return
+        executor.execute {
+            runCatching { applyManualFriendRemark(settings, wxid) }
+                .onFailure { HLog.e("$TAG 手动通过好友后备注失败: ${it.message}", it) }
+        }
+    }
+
+    private fun applyManualFriendRemark(settings: AutoReplySettings, wxid: String) {
+        synchronized(manualRemarkLock) {
+            val contacts = WeChatApis.contact().contacts() ?: return
+            val contact = contacts.getContact(wxid) ?: return
+            val base = contact.remarkName.ifBlank { contact.nickname }.trim().ifBlank { contact.wxId }
+            val pattern = settings.getString(
+                AutoReplySettings.KEY_MANUAL_FRIEND_REMARK_DATE_FORMAT,
+                AutoReplySettings.DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT
+            )
+            val date = formatDate(pattern, AutoReplySettings.DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT)
+            if (base.endsWith(date)) return
+            val remark = "$base $date"
+            runCatching { contacts.modifyContactRemark(wxid, remark) }
+                .onFailure { HLog.e("$TAG 修改好友备注失败: ${it.message}", it) }
+        }
+    }
+
+    /**
+     * 兜底触发：手动通过好友后，微信会在会话里插入“你已添加了xxx，现在可以开始聊天了”系统提示。
+     * 联系人变更回调没有命中时由这里补一次；重复触发会被备注里的日期判重挡住。
+     */
+    private fun handleManualAcceptTip(
+        settings: AutoReplySettings,
+        message: WeChatMessageObserveApi.ObservedMessage
+    ) {
+        if (!settings.getBoolean(AutoReplySettings.KEY_MANUAL_FRIEND_ENABLE, AutoReplySettings.DEFAULT_MANUAL_FRIEND_ENABLE)) return
+        if (!message.isSystem()) return
+        val talker = message.talker.ifBlank { message.getTalker() }
+        if (talker.isBlank() || message.group) return
+        if (talker.endsWith("@chatroom") || talker.endsWith("@im.chatroom")) return
+        val content = plainContent(message)
+        if (!content.startsWith(AutoReplySettings.MANUAL_FRIEND_ADDED_PREFIX)) return
+        if (!content.endsWith(AutoReplySettings.MANUAL_FRIEND_ADDED_SUFFIX)) return
+        pendingManualFriends.remove(talker)
+        applyManualFriendRemark(settings, talker)
     }
 
     private fun handleFriendAccepted(

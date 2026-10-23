@@ -271,6 +271,10 @@ class AutoReplySettings(context: Context?) {
         const val KEY_AUTO_ACCEPT_REMARK_DATE_FORMAT = "auto_accept_remark_date_format"
         const val KEY_AUTO_ACCEPT_REMARK_CUSTOM_ENABLE = "auto_accept_remark_custom_enable"
         const val KEY_AUTO_ACCEPT_REMARK_CUSTOM_TEXT = "auto_accept_remark_custom_text"
+        const val KEY_MANUAL_FRIEND_ENABLE = "manual_friend_enable"
+        const val KEY_MANUAL_FRIEND_REMARK_DATE_FORMAT = "manual_friend_remark_date_format"
+        const val MANUAL_FRIEND_ADDED_PREFIX = "你已添加了"
+        const val MANUAL_FRIEND_ADDED_SUFFIX = "现在可以开始聊天了"
         const val KEY_GREET_ACCEPTED_ENABLE = "greet_accepted_enable"
         const val KEY_GREET_ACCEPTED_DELAY_MS = "greet_accepted_delay_ms"
         const val KEY_GREET_ACCEPTED_STEPS = "greet_accepted_steps_v1"
@@ -316,6 +320,8 @@ class AutoReplySettings(context: Context?) {
         const val KEY_ZHILIA_MODEL_FAVORITES = "zhilia_model_favorites_v1"
 
         const val DEFAULT_ENABLE = false
+        const val DEFAULT_MANUAL_FRIEND_ENABLE = true
+        const val DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT = "yyyy-MM-dd"
         const val DEFAULT_AI_API_BASE = "https://api.siliconflow.cn/v1"
         const val DEFAULT_AI_API_PATH = "/chat/completions"
         const val DEFAULT_AI_MODEL = "deepseek-ai/DeepSeek-V3"

@@ -25,21 +25,12 @@ android {
         }
     }
 
-    signingConfigs {
-        create("。。") {
-            storeFile = file("keystore/。。.jks")
-            storePassword = providers.environmentVariable("HCAT_STORE_PASSWORD").orNull
-                ?: error("缺少 HCAT_STORE_PASSWORD")
-            keyAlias = providers.environmentVariable("HCAT_KEY_ALIAS").orNull
-                ?: error("缺少 HCAT_KEY_ALIAS")
-            keyPassword = providers.environmentVariable("HCAT_KEY_PASSWORD").orNull
-                ?: error("缺少 HCAT_KEY_PASSWORD")
-        }
-    }
+    // 个人 fork 测试包：不再依赖 HCAT_KEYSTORE_* 等 Secret，release 直接用 AGP 自带的 debug 签名。
+    // LSPosed 模块不要求特定签名；debug 签名包不能覆盖安装正式版，需要先卸载。
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("。。")
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
