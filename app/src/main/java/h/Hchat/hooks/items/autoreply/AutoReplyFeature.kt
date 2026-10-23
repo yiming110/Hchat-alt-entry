@@ -31,7 +31,11 @@ class AutoReplyFeature : BaseFeature() {
                 AutoReplyRuntime.handleNewFriend(context.hostContext(), event.wxid, event.ticket, event.scene)
             })
             // 好友申请不自动通过：监听联系人表变化，等用户手动通过后补备注日期。
-            trackSubscription(WeChatApis.contactChanges()?.subscribe { change ->
+            val contactChangeApi = WeChatApis.contactChanges()
+            HLog.e("$TAG [好友请求] contactChanges 可用=${contactChangeApi != null}")
+            AutoReplyRuntime.primeFriendSnapshot()
+            trackSubscription(contactChangeApi?.subscribe { change ->
+                if (change?.isAvatarChange() == true) return@subscribe
                 AutoReplyRuntime.handleContactChanged(context.hostContext(), change?.wxId().orEmpty())
             })
         }

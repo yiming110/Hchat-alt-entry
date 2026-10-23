@@ -69,6 +69,9 @@ object AutoReplyRuntime {
     private val replyCounts = ConcurrentHashMap<String, Int>()
     private val lastReplyTimes = ConcurrentHashMap<String, Long>()
     private val pendingManualFriends = ConcurrentHashMap<String, Long>()
+    private val manualWatchdogs = ConcurrentHashMap<String, Boolean>()
+    private val knownFriends = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    private val knownFriendsReady = AtomicBoolean(false)
     private val manualRemarkLock = Any()
     private val aiHistories = ConcurrentHashMap<String, MutableList<AiMessage>>()
     private val xiaozhiSessions = ConcurrentHashMap<String, String>()
@@ -238,6 +241,8 @@ object AutoReplyRuntime {
                 val now = System.currentTimeMillis()
                 pendingManualFriends.entries.removeAll { now - it.value > PENDING_MANUAL_FRIEND_TTL_MS }
                 pendingManualFriends[wxid] = now
+                debugLog("收到好友申请，登记等待手动通过: $wxid")
+                startManualFriendWatchdog(context, wxid)
             }
             return
         }
@@ -262,43 +267,109 @@ object AutoReplyRuntime {
     }
 
     /**
-     * 联系人表变化回调。只有“之前收到过好友申请 + 现在已经是好友”两个条件同时满足，
-     * 才说明用户刚刚在微信里手动通过了申请，此时再补备注日期。
+     * 联系人表变化回调。命中以下任一条件就认为“刚刚多了一个好友”，补备注：
+     * 1. 这个 wxid 之前收到过好友申请（pendingManualFriends）；
+     * 2. 启动快照里没有他，现在联系人表里他已经是好友（兜底，防止申请钩子没触发）。
      */
     fun handleContactChanged(context: Context, wxid: String) {
         if (wxid.isBlank()) return
-        val requestedAt = pendingManualFriends[wxid] ?: return
-        if (System.currentTimeMillis() - requestedAt > PENDING_MANUAL_FRIEND_TTL_MS) {
-            pendingManualFriends.remove(wxid, requestedAt)
-            return
-        }
         val settings = AutoReplySettings(context)
         if (!settings.getBoolean(AutoReplySettings.KEY_MANUAL_FRIEND_ENABLE, AutoReplySettings.DEFAULT_MANUAL_FRIEND_ENABLE)) return
-        val contacts = WeChatApis.contact().contacts() ?: return
-        if (!contacts.isFriend(wxid)) return
-        // 先摘掉登记再写库，避免自己修改备注触发的 rcontact 变更再次进入这里。
-        if (!pendingManualFriends.remove(wxid, requestedAt)) return
+        val contact = runCatching { WeChatApis.contact().contacts()?.getContact(wxid) }.getOrNull() ?: return
+        if (!looksLikeFriend(contact)) return
+        val pendingHit = pendingManualFriends.remove(wxid) != null
+        val firstSeen = knownFriendsReady.get() && knownFriends.isNotEmpty() && knownFriends.add(wxid)
+        if (!pendingHit && !firstSeen) return
+        debugLog("发现新好友 $wxid type=${contact.type} pending=$pendingHit firstSeen=$firstSeen")
         executor.execute {
             runCatching { applyManualFriendRemark(settings, wxid) }
                 .onFailure { HLog.e("$TAG 手动通过好友后备注失败: ${it.message}", it) }
         }
     }
 
+    /** 启动时给现有好友拍个快照，用来判断后面冒出来的 wxid 是不是“新加的”。 */
+    fun primeFriendSnapshot() {
+        if (!knownFriendsReady.compareAndSet(false, true)) return
+        executor.execute {
+            runCatching {
+                val contacts = WeChatApis.contact().contacts() ?: return@runCatching
+                contacts.getContacts().forEach { c ->
+                    if (looksLikeFriend(c)) knownFriends.add(c.wxId)
+                }
+                debugLog("好友快照完成: ${knownFriends.size} 个")
+            }.onFailure { debugLog("好友快照失败: ${it.message}") }
+        }
+    }
+
+    private fun looksLikeFriend(contact: h.Hchat.hooks.api.model.WeChatContact?): Boolean {
+        if (contact == null) return false
+        if (contact.isGroup()) return false
+        val type = contact.type
+        return (type and 1) != 0 && (type and 8) == 0 && (type and 32) == 0
+    }
+
     private fun applyManualFriendRemark(settings: AutoReplySettings, wxid: String) {
         synchronized(manualRemarkLock) {
-            val contacts = WeChatApis.contact().contacts() ?: return
-            val contact = contacts.getContact(wxid) ?: return
+            val contacts = WeChatApis.contact().contacts() ?: run {
+                debugLog("联系人 API 不可用，跳过备注: $wxid")
+                return
+            }
+            val contact = contacts.getContact(wxid) ?: run {
+                debugLog("查不到联系人，跳过备注: $wxid")
+                return
+            }
             val base = contact.remarkName.ifBlank { contact.nickname }.trim().ifBlank { contact.wxId }
             val pattern = settings.getString(
                 AutoReplySettings.KEY_MANUAL_FRIEND_REMARK_DATE_FORMAT,
                 AutoReplySettings.DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT
             )
             val date = formatDate(pattern, AutoReplySettings.DEFAULT_MANUAL_FRIEND_REMARK_DATE_FORMAT)
-            if (base.endsWith(date)) return
+            if (base.endsWith(date)) {
+                debugLog("备注已含当天日期，跳过: $wxid -> $base")
+                return
+            }
             val remark = "$base $date"
-            runCatching { contacts.modifyContactRemark(wxid, remark) }
+            val ok = runCatching { contacts.modifyContactRemark(wxid, remark) }
                 .onFailure { HLog.e("$TAG 修改好友备注失败: ${it.message}", it) }
+                .getOrDefault(false)
+            debugLog("写备注 $wxid -> $remark result=$ok (原备注=${contact.remarkName}, 昵称=${contact.nickname})")
         }
+    }
+
+    /**
+     * 兜底轮询：好友申请进来后，每 3 秒查一次是否已经变成好友，最多等 30 分钟。
+     * 不依赖 rcontact 变更回调，也不依赖微信提示文案；成为好友后立刻补备注。
+     */
+    private fun startManualFriendWatchdog(context: Context, wxid: String) {
+        if (wxid.isBlank()) return
+        if (manualWatchdogs.putIfAbsent(wxid, true) != null) return
+        Thread({
+            try {
+                val deadline = System.currentTimeMillis() + PENDING_MANUAL_FRIEND_TTL_MS
+                while (System.currentTimeMillis() < deadline) {
+                    Thread.sleep(3000L)
+                    val settings = AutoReplySettings(context)
+                    if (!settings.getBoolean(AutoReplySettings.KEY_MANUAL_FRIEND_ENABLE, AutoReplySettings.DEFAULT_MANUAL_FRIEND_ENABLE)) return@Thread
+                    val contact = runCatching { WeChatApis.contact().contacts()?.getContact(wxid) }.getOrNull() ?: continue
+                    val isFriend = looksLikeFriend(contact)
+                    if (isFriend) {
+                        debugLog("轮询检测到已成为好友，开始备注: $wxid type=${contact.type}")
+                        pendingManualFriends.remove(wxid)
+                        runCatching { applyManualFriendRemark(settings, wxid) }
+                            .onFailure { HLog.e("$TAG 手动通过好友后备注失败: ${it.message}", it) }
+                        return@Thread
+                    }
+                }
+                debugLog("等待手动通过超时: $wxid")
+            } catch (_: Throwable) {
+            } finally {
+                manualWatchdogs.remove(wxid)
+            }
+        }, "Hchat-ManualFriendWatch").apply { isDaemon = true }.start()
+    }
+
+    private fun debugLog(message: String) {
+        runCatching { HLog.e("$TAG [好友请求] $message") }
     }
 
     /**
